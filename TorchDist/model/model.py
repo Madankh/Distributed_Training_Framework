@@ -14,6 +14,7 @@ class DeepSeekV3model(nn.Module):
         self.tok_embeddings = nn.Embedding(args.vocab_size, args.dim)
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
         self.layers = torch.nn.ModuleDict()
+
         for layer_idx in range(args.layers):
             self.layers[str(layer_idx)] = TransformerBlock(layer_idx, args)
 
@@ -32,4 +33,32 @@ class DeepSeekV3model(nn.Module):
         buffer_device:torch.device | None = None
     ):
         buffer_device = buffer_device or  self.freqs_cis.device
+        with torch.device(buffer_device):
+            self.freqs_cis = precompute_freqs_cis(self.model_args)
+        if tok_embeddings is not None:
+            nn.init.normal_(self.tok_embeddings.weight)
+        
+        for layer in self.layers.values():
+            if layer is not None:
+                layer.init_weights(init_std=init_std,buffer_device=buffer_device)
+        if self.norm is not None:
+            self.norm.reset_parameters()
+        final_out_std = self.model_args.dim**-0.5
+        cutoff_factor = 3
 
+        if self.output is not None:
+            nn.init.trunc_normal_(
+                self.output.weight, 
+                mean=0.0,
+                std=final_out_std,
+                a = -cutoff_factor * final_out_std,
+                b = cutoff_factor * final_out_std
+            )
+
+    def forward(self, tokens:torch.Tensor):
+        h = self.tok_embeddings(tokens) if self.tok_embedding is not None else tokens
+        for layer_idx in self.layers.values():
+            h = layer(h, self.freqs_cis)
+        h = self.norm(h) if self.norm is not None else h
+        output = self.output(h) if self.output is not None else h
+        return output
