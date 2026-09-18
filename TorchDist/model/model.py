@@ -7,6 +7,42 @@ from TorchDist.model.model_args import DeepSeekV3Args
 from TorchDist.model.moe import FeedForward, MoE
 from TorchDist.model.rope import apply_rotary_emb, precompute_freqs_cis
 
+class Attention(nn.Module):
+    def __init__(self, args:DeepSeekV3Args):
+        super().__init__()
+        self.dim = args.dim # 2048
+        self.n_heads = args.n_heads # 16
+        self.q_lora_rank = args.q_lora_rank # 0
+        self.kv_lora_rank = args.kv_lora_rank # 512
+        self.qk_nope_head_dim = args.qk_nope_head_dim # 128
+        self.qk_rope_head_dim = args.qk_rope_head_dim
+        self.qk_head_dim = (
+            self.qk_nope_head_dim + self.qk_rope_head_dim
+        )
+        self.v_head_dim = args.v_head_dim
+
+        # We won't be using it.
+        if self.q_lora_rank == 0:
+            self.wq = nn.Linear(self.dim, self.n_heads * self.qk_head_dim, bias=False)
+        else:
+            self.wq_a = nn.Linear(self.dim,  self.q_lora_rank, bias=False)
+            self.q_norm = nn.RMSNorm(self.q_lora_rank, eps=args.norm_eps)
+            self.wq_b = nn.Linear(self.q_lora_rank, self.n_heads * self.qk_head_dim, bias=False)
+        self.wkv_a = nn.Linear(self.dim, self.kv_lora_rank + self.qk_rope_head_dim, bias=False)
+        self.kv_norm  = nn.RMSNorm(self.kv_lora_rank, eps=args.norms_eps)
+        self.wkv_b = nn.Linear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim),bias=False)
+        self.wo = nn.Linear(self.n_heads * self.v_head_dim, self.dim, bias=False)
+        self.softmax_scale = self.qk_head_dim ** -0.5
+        
+        if model_args.max_seq_len > model_args.original_seq_len:
+            mscale = 0.1 * model_args.mscale * math.log(model_args.rope_factor) + 1.0
+            self.softmax_scale = self.softmax_scale * mscale * mscale
+
+        self.inner_attention = ScaledDotProductAttentionWrapper()
+
+
+
+
 class TransformerBlock(nn.Module):
     def __init__(self, layer_id:int, args:DeepSeekV3Args):
         super().__init__()
