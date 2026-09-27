@@ -37,10 +37,48 @@ class Attention(nn.Module):
         if model_args.max_seq_len > model_args.original_seq_len:
             mscale = 0.1 * model_args.mscale * math.log(model_args.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
-
         self.inner_attention = ScaledDotProductAttentionWrapper()
+    
+    def forward(
+        self, 
+        x:torch.Tensor, 
+        freqs_cis:torch.Tensor,
+    ):
+    batch_size, seq_len, _  = x.size()
+    # Query projection
+    if self.q_lora_rank == 0:
+        q =  self.wq(x)
+    else:
+        q = self.wq_a(x)
+        q = self.wq_b(self.q_norm(q))
+    # q: [batch_size, seq_len, n_heads,  qk_head_dim]
+    q = q.view(batch_size,  seq_len, -1, self.qk_head_dim)
+    # q_nope: [batch_size, seq_len,  n_heads, qk_nope_head_dim]
+    # q_pe: [batch_size, seq_len, n_heads, qk_rope_head_dim]
+    q_nope, q_pe = torch.split(q, [self.qk_nope_head_dim,  self.qk_rope_head_dim], dim=-1)
+    q_pe =  apply_rotary_emb(q_pe, freqs_cis)
+    # q (batch_size, seq_len, n_heads, qk_head_dim)
+    q = torch.cat([q_nope, q_pe],dim=-1)
 
+    # key-value projection
+    # kv: [batch_size, seq_len, kv_lora_rank + qk_rope_head_dim]
+    kv = self.wkv_a(x)
+    kv,k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+    k_pe = apply_rotary_emb(k_pe.unsequeeze(2), freqs_cis)
 
+    # up projection to rebuild 
+
+    # kv:[batch_size, seq_len, n_heads * (qk_nope_head_dim + v_head_dim)]
+    kv = self.wkv_b(self.kv_norm(kv))
+    # kv:[batch_size, seq_len, n_heads ,qk_nope_head_dim + v_head_dim]
+    kv = kv.view(batch_size, seq_len, -1, self.qk_nope_head_dim + self.v_head_dim)
+    k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+    k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1)
+
+    q = q.transpose(1,2)
+    k = k.transpose(1,2)
+    v = v.transpose(1,2)
+    output = self.inner_attention(q,k,v,scale=self.softmax_scale)
 
 
 class TransformerBlock(nn.Module):
