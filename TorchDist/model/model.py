@@ -79,6 +79,9 @@ class Attention(nn.Module):
     k = k.transpose(1,2)
     v = v.transpose(1,2)
     output = self.inner_attention(q,k,v,scale=self.softmax_scale)
+    output = output.transpose(1,2).contiguous()
+    output = output.view(batch_size, seq_len, -1)
+    return self.wo(output)
 
 
 class TransformerBlock(nn.Module):
